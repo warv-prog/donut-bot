@@ -31,6 +31,118 @@ function handleWebSocketMessage(e) {
   }
 }
 
+// Toggle auth fields
+function toggleAuthFields() {
+  const method = document.getElementById('authMethod').value;
+  const microsoftFields = document.getElementById('microsoftFields');
+  const cachedFields = document.getElementById('cachedFields');
+  
+  if (method === 'microsoft') {
+    microsoftFields.style.display = 'block';
+    cachedFields.style.display = 'none';
+  } else {
+    microsoftFields.style.display = 'none';
+    cachedFields.style.display = 'block';
+    loadCachedAccounts();
+  }
+}
+
+// Load cached accounts
+async function loadCachedAccounts() {
+  try {
+    const response = await fetch('/api/cache/accounts');
+    const accounts = await response.json();
+    
+    const select = document.getElementById('cachedAccount');
+    select.innerHTML = '<option value="">Select account...</option>';
+    
+    accounts.forEach(acc => {
+      const option = document.createElement('option');
+      option.value = acc.id;
+      option.textContent = acc.email || acc.id;
+      select.appendChild(option);
+    });
+    
+    // Update cache management
+    const cacheList = document.getElementById('cacheList');
+    cacheList.innerHTML = '';
+    
+    accounts.forEach(acc => {
+      const item = document.createElement('div');
+      item.className = 'cache-item';
+      const date = new Date(acc.timestamp || Date.now()).toLocaleDateString();
+      item.innerHTML = `
+        <div class="cache-item-info">
+          <div class="cache-item-email">✓ ${acc.email}</div>
+          <div class="cache-item-time">${date}</div>
+        </div>
+        <button class="cache-delete-btn danger" onclick="deleteCacheAccount('${acc.id}')">✕</button>
+      `;
+      cacheList.appendChild(item);
+    });
+  } catch (error) {
+    console.error('Error loading cached accounts:', error);
+  }
+}
+
+// Delete cache account
+async function deleteCacheAccount(id) {
+  if (!confirm('Delete this cached account?')) return;
+  
+  try {
+    const response = await fetch(`/api/cache/delete/${id}`, { method: 'POST' });
+    const result = await response.json();
+    if (result.success) {
+      loadCachedAccounts();
+    }
+  } catch (error) {
+    console.error('Error deleting cache:', error);
+  }
+}
+
+// Login and cache
+async function loginAndCache() {
+  const email = document.getElementById('botEmail').value.trim();
+  const password = document.getElementById('botPassword').value.trim();
+  
+  if (!email || !password) {
+    alert('Email and password required');
+    return;
+  }
+  
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Logging in...';
+  
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+      alert(`✓ Account cached! Ready to use.\n${result.profile?.name || email}`);
+      document.getElementById('botEmail').value = '';
+      document.getElementById('botPassword').value = '';
+      
+      // Switch to cached method
+      document.getElementById('authMethod').value = 'cached';
+      toggleAuthFields();
+      loadCachedAccounts();
+    } else {
+      alert(`❌ Login failed: ${result.message}`);
+    }
+  } catch (error) {
+    alert(`Error: ${error.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Login & Cache';
+  }
+}
+
 // Load and display bots
 async function loadBots() {
   try {
@@ -73,10 +185,8 @@ function selectBot(botId) {
     const bot = bots.find(b => b.id === botId);
     if (!bot) return;
 
-    // Update header
     document.getElementById('mainHeader').textContent = `🤖 ${bot.name} - ${bot.running ? '● Running' : '● Stopped'}`;
 
-    // Setup terminal
     const content = document.getElementById('content');
     content.innerHTML = `
       <div style="padding: 15px; background: #252526; border-bottom: 1px solid #3e3e42; display: flex; gap: 10px;">
@@ -87,7 +197,6 @@ function selectBot(botId) {
       <div class="terminal-container" id="terminalBox"></div>
     `;
 
-    // Create terminal
     currentTerm = new Term({
       cursorBlink: true,
       theme: {
@@ -104,7 +213,6 @@ function selectBot(botId) {
 
     window.addEventListener('resize', () => fitAddon.fit());
 
-    // Subscribe to bot output
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'subscribe', botId }));
     }
@@ -131,20 +239,40 @@ async function createBot() {
     return;
   }
 
-  const token = document.getElementById('botToken').value.trim();
-  if (!token) {
-    alert('Access token required');
-    return;
-  }
+  const authMethod = document.getElementById('authMethod').value;
+  let config;
 
-  const config = {
-    host: host,
-    port: parseInt(document.getElementById('botPort').value),
-    username: username,
-    accessToken: token,
-    clientToken: document.getElementById('botClientToken').value.trim() || uuidv4(),
-    version: document.getElementById('botVersion').value
-  };
+  if (authMethod === 'cached') {
+    const cacheId = document.getElementById('cachedAccount').value;
+    if (!cacheId) {
+      alert('Select a cached account');
+      return;
+    }
+    
+    config = {
+      host,
+      port: parseInt(document.getElementById('botPort').value),
+      username,
+      version: document.getElementById('botVersion').value,
+      authMethod: 'cached',
+      cacheId
+    };
+  } else {
+    const email = document.getElementById('botEmail').value.trim();
+    if (!email) {
+      alert('Microsoft email required');
+      return;
+    }
+    
+    config = {
+      host,
+      port: parseInt(document.getElementById('botPort').value),
+      username,
+      version: document.getElementById('botVersion').value,
+      authMethod: 'microsoft',
+      email
+    };
+  }
 
   try {
     const response = await fetch('/api/bots/create', {
@@ -158,10 +286,8 @@ async function createBot() {
       document.getElementById('botName').value = '';
       document.getElementById('botHost').value = '';
       document.getElementById('botUsername').value = '';
-      document.getElementById('botToken').value = '';
-      document.getElementById('botClientToken').value = '';
       loadBots();
-      alert(`Bot created with ID: ${result.id}`);
+      alert(`✓ Bot created with ID: ${result.id}`);
     } else {
       alert('Error: ' + result.message);
     }
@@ -251,14 +377,9 @@ async function updateBotConfig(botId) {
   }
 }
 
-// Generate UUID
-function uuidv4() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
-
-// Auto-refresh bots every 2 seconds
-setInterval(loadBots, 2000);
-loadBots();
+// Initialize on load
+window.addEventListener('load', () => {
+  loadBots();
+  loadCachedAccounts();
+  setInterval(loadBots, 2000);
+});

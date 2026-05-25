@@ -1,7 +1,7 @@
 {
-  "name": "multi-bot-control",
+  "name": "donut-bot",
   "version": "1.0.0",
-  "description": "Multi-bot Minecraft control panel for Mineflayer",
+  "description": "Multi-bot Minecraft control panel with cached session support",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,6 +11,7 @@
     "express": "^4.18.2",
     "ws": "^8.14.2",
     "uuid": "^9.0.0",
-    "mineflayer": "^4.10.0"
+    "mineflayer": "^4.10.0",
+    "prismarine-auth": "^2.3.0"
   }
 }

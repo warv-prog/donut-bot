@@ -151,6 +151,7 @@ button {
   font-weight: bold;
   margin-bottom: 8px;
   transition: background 0.3s;
+  font-size: 12px;
 }
 
 button:hover {
@@ -229,4 +230,44 @@ button:disabled {
   font-size: 11px;
   color: #999;
   margin-top: 3px;
+}
+
+.cache-item {
+  padding: 8px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 3px;
+  margin-bottom: 5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cache-item-info {
+  flex: 1;
+}
+
+.cache-item-email {
+  color: #4fc3f7;
+  font-weight: bold;
+}
+
+.cache-item-time {
+  color: #999;
+  font-size: 11px;
+}
+
+.cache-delete-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 12px;
+  background: #d32f2f;
+  margin: 0;
+}
+
+.info-text {
+  font-size: 11px;
+  color: #999;
+  margin-top: 5px;
 }

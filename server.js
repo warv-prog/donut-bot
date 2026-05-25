@@ -15,11 +15,17 @@ app.use(express.json());
 
 // Store all bot instances
 const bots = new Map();
-const botConnections = new Map(); // WebSocket connections per bot
+const botConnections = new Map();
 
-// Load saved bot configs
+// Cache directory for auth sessions
+const CACHE_DIR = path.join(__dirname, 'cache');
 const CONFIG_FILE = 'bots-config.json';
 let savedConfigs = {};
+
+// Create cache directory if it doesn't exist
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
 
 if (fs.existsSync(CONFIG_FILE)) {
   try {
@@ -29,10 +35,44 @@ if (fs.existsSync(CONFIG_FILE)) {
   }
 }
 
-// Save configs to file
 function saveConfigs() {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(savedConfigs, null, 2));
 }
+
+// Get cached accounts
+app.get('/api/cache/accounts', (req, res) => {
+  try {
+    const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json'));
+    const accounts = files.map(f => {
+      const filePath = path.join(CACHE_DIR, f);
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      return {
+        id: f.replace('.json', ''),
+        email: data.email || 'Unknown',
+        profile: data.profile || {}
+      };
+    });
+    res.json(accounts);
+  } catch (error) {
+    console.error('Error reading cache:', error);
+    res.json([]);
+  }
+});
+
+// Delete cached account
+app.post('/api/cache/delete/:id', (req, res) => {
+  try {
+    const filePath = path.join(CACHE_DIR, `${req.params.id}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      res.json({ success: true, message: 'Cache deleted' });
+    } else {
+      res.json({ success: false, message: 'Cache not found' });
+    }
+  } catch (error) {
+    res.json({ success: false, message: error.message });
+  }
+});
 
 // Get all bots status
 app.get('/api/bots', (req, res) => {
@@ -42,7 +82,7 @@ app.get('/api/bots', (req, res) => {
     running: bot.process !== null,
     config: bot.config,
     uptime: bot.startTime ? Date.now() - bot.startTime : 0,
-    output: bot.output.slice(-50) // Last 50 lines
+    output: bot.output.slice(-50)
   }));
   res.json(botsList);
 });
@@ -105,6 +145,48 @@ app.post('/api/bots/:id/config', (req, res) => {
   res.json({ success: true, message: 'Config updated' });
 });
 
+// Login and cache account
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  try {
+    const { Authenticator } = require('prismarine-auth');
+    const cacheId = email.replace(/[^a-z0-9]/gi, '_');
+    const cachePath = path.join(CACHE_DIR, `${cacheId}.json`);
+    
+    console.log(`[AUTH] Logging in ${email}...`);
+    
+    const auth = new Authenticator();
+    await auth.loginToMicrosoft(email, password, { cache: cachePath });
+    
+    const profile = auth.getSelectedProfile();
+    const accessToken = auth.accessToken;
+    
+    // Save cache with metadata
+    const cacheData = {
+      email,
+      profile: profile,
+      accessToken,
+      timestamp: Date.now()
+    };
+    
+    fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+    
+    res.json({
+      success: true,
+      message: 'Logged in and cached',
+      cacheId,
+      profile
+    });
+  } catch (error) {
+    console.error('[AUTH] Login error:', error.message);
+    res.json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
 // Start bot
 app.post('/api/bots/:id/start', (req, res) => {
   const { id } = req.params;
@@ -118,58 +200,153 @@ app.post('/api/bots/:id/start', (req, res) => {
     return res.json({ success: false, message: 'Bot already running' });
   }
 
-  // Create bot.js with config
-  const botScript = `
+  // Get auth method and prepare bot script
+  const authMethod = bot.config.authMethod || 'cached';
+  let botScript;
+
+  if (authMethod === 'cached') {
+    const cachePath = path.join(CACHE_DIR, `${bot.config.cacheId}.json`);
+    const cacheData = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    
+    botScript = `
 const mineflayer = require('mineflayer');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+const fs = require('fs');
+
 const botConfig = ${JSON.stringify(bot.config)};
+const cachePath = ${JSON.stringify(cachePath)};
 
-console.log('[BOT] Starting with config:', {
+console.log('[BOT] Starting with cached session:', {
   host: botConfig.host,
   port: botConfig.port,
   username: botConfig.username,
-  version: botConfig.version
+  version: botConfig.version,
+  auth: 'microsoft',
+  cache: 'ENABLED'
 });
 
-const bot = mineflayer.createBot({
-  host: botConfig.host,
-  port: botConfig.port,
-  username: botConfig.username,
-  accessToken: botConfig.accessToken,
-  clientToken: botConfig.clientToken,
-  auth: 'mojang',
-  version: botConfig.version
-});
+const { Authenticator } = require('prismarine-auth');
+const auth = new Authenticator();
 
-bot.on('login', () => {
-  console.log('[BOT] ✓ Logged in as', bot.username);
-});
+// Load cached session
+auth.getAuth('microsoft', { cache: cachePath }).then(async (session) => {
+  console.log('[BOT] ✓ Using cached session');
+  
+  const bot = mineflayer.createBot({
+    host: botConfig.host,
+    port: botConfig.port,
+    username: botConfig.username,
+    auth: 'microsoft',
+    version: botConfig.version,
+    authTitle: 'Mineflayer',
+    session
+  });
 
-bot.on('spawn', () => {
-  console.log('[BOT] ✓ Spawned in world');
-  bot.chat('Bot online!');
-});
+  bot.on('login', () => {
+    console.log('[BOT] ✓ Logged in as', bot.username);
+  });
 
-bot.on('chat', (username, message) => {
-  if (username === bot.username) return;
-  console.log('[CHAT] [' + username + '] ' + message);
-});
+  bot.on('spawn', () => {
+    console.log('[BOT] ✓ Spawned in world');
+    setTimeout(() => {
+      bot.chat('Bot online!');
+    }, 1000);
+  });
 
-bot.on('error', (err) => {
-  console.error('[ERROR]', err.message);
-});
+  bot.on('chat', (username, message) => {
+    if (username === bot.username) return;
+    console.log('[CHAT] [' + username + '] ' + message);
+  });
 
-bot.on('end', () => {
-  console.log('[BOT] Disconnected');
-  process.exit(0);
-});
+  bot.on('error', (err) => {
+    console.error('[ERROR]', err.message);
+  });
 
-bot.on('kicked', (reason) => {
-  console.error('[KICKED]', reason);
+  bot.on('end', () => {
+    console.log('[BOT] Disconnected');
+    process.exit(0);
+  });
+
+  bot.on('kicked', (reason) => {
+    console.error('[KICKED]', reason);
+  });
+}).catch(err => {
+  console.error('[AUTH ERROR]', err.message);
+  console.error('Cache may be expired. Please login again.');
+  process.exit(1);
 });
 `;
+  } else {
+    // Fresh login
+    botScript = `
+const mineflayer = require('mineflayer');
+const { Authenticator } = require('prismarine-auth');
+const path = require('path');
+const fs = require('fs');
+
+const botConfig = ${JSON.stringify(bot.config)};
+const cachePath = ${JSON.stringify(path.join(CACHE_DIR, `${bot.config.email.replace(/[^a-z0-9]/gi, '_')}.json`))};
+
+console.log('[BOT] Starting with Microsoft login:', {
+  host: botConfig.host,
+  port: botConfig.port,
+  username: botConfig.username,
+  version: botConfig.version
+});
+
+const auth = new Authenticator();
+auth.getAuth('microsoft', { cache: cachePath }).then(async (session) => {
+  console.log('[BOT] ✓ Microsoft auth successful');
+  
+  const bot = mineflayer.createBot({
+    host: botConfig.host,
+    port: botConfig.port,
+    username: botConfig.username,
+    auth: 'microsoft',
+    version: botConfig.version,
+    authTitle: 'Mineflayer',
+    session
+  });
+
+  bot.on('login', () => {
+    console.log('[BOT] ✓ Logged in as', bot.username);
+  });
+
+  bot.on('spawn', () => {
+    console.log('[BOT] ✓ Spawned in world');
+    setTimeout(() => {
+      bot.chat('Bot online!');
+    }, 1000);
+  });
+
+  bot.on('chat', (username, message) => {
+    if (username === bot.username) return;
+    console.log('[CHAT] [' + username + '] ' + message);
+  });
+
+  bot.on('error', (err) => {
+    console.error('[ERROR]', err.message);
+  });
+
+  bot.on('end', () => {
+    console.log('[BOT] Disconnected');
+    process.exit(0);
+  });
+
+  bot.on('kicked', (reason) => {
+    console.error('[KICKED]', reason);
+  });
+}).catch(err => {
+  console.error('[AUTH ERROR]', err.message);
+  process.exit(1);
+});
+`;
+  }
 
   bot.process = spawn('node', ['-e', botScript], {
-    stdio: 'pipe'
+    stdio: 'pipe',
+    env: { ...process.env }
   });
 
   bot.startTime = Date.now();
@@ -179,7 +356,7 @@ bot.on('kicked', (reason) => {
     const lines = data.toString().split('\n').filter(l => l);
     lines.forEach(line => {
       bot.output.push(line);
-      if (bot.output.length > 500) bot.output.shift(); // Keep last 500 lines
+      if (bot.output.length > 500) bot.output.shift();
       broadcastToBot(id, line + '\n');
     });
   });
@@ -281,4 +458,5 @@ Object.entries(savedConfigs).forEach(([id, { name, config }]) => {
 const PORT = 3000;
 server.listen(PORT, () => {
   console.log(`🤖 Multi-Bot Control Panel running on http://localhost:${PORT}`);
+  console.log(`📁 Cache directory: ${CACHE_DIR}`);
 });
